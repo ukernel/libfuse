@@ -181,6 +181,17 @@ enum fuse_notify_entry_flags {
  */
 #define FUSE_SET_ATTR_WRITEBACK	(1 << 30)
 
+/*
+ * 'flags' in statx, beside the AT_STATX_* values: the caller does not need
+ * cluster-coherent size, blocks, mtime and ctime, so the filesystem may
+ * answer from its current values without recalling locks other clients
+ * hold.  Such a reply must have a zero attr_timeout, see the statx
+ * operation.  Not a statx(2) flag - clear it before passing 'flags' on to
+ * statx(2), which rejects it with EINVAL.  Shares the value of the
+ * FUSE_STATX_LIGHT wire bit, so it needs no translation.
+ */
+#define FUSE_STATX_FLAG_LIGHT	(1U << 31)
+
 /**
  * Type of the dlm lock requested
  */
@@ -1392,13 +1403,21 @@ struct fuse_lowlevel_ops {
 	/**
 	 * Get extended file attributes.
 	 *
+	 * If flags has FUSE_STATX_FLAG_LIGHT, the filesystem may answer
+	 * without making size, blocks, mtime and ctime coherent.  Such a
+	 * reply must call fuse_reply_statx() with an attr_timeout of 0, so
+	 * the kernel does not cache it.  A non-zero attr_timeout tells the
+	 * kernel the values are coherent, and it caches them in the inode:
+	 * a stale, smaller size then shrinks i_size and the page cache.
+	 *
 	 * Valid replies:
 	 *   fuse_reply_statx
 	 *   fuse_reply_err
 	 *
 	 * @param req request handle
 	 * @param ino the inode number
-	 * @param flags bitmask of requested flags
+	 * @param flags bitmask of requested flags (AT_STATX_* and
+	 *              FUSE_STATX_FLAG_LIGHT)
 	 * @param mask bitmask of requested fields
 	 * @param fi file information (may be NULL)
 	 */
@@ -1978,7 +1997,9 @@ int fuse_reply_lseek(fuse_req_t req, off_t off);
  * @param req request handle
  * @param flags statx flags
  * @param statx the attributes
- * @param attr_timeout	validity timeout (in seconds) for the attributes
+ * @param attr_timeout	validity timeout (in seconds) for the attributes,
+ *			0 for a reply to FUSE_STATX_FLAG_LIGHT that is not
+ *			coherent
  * @return zero for success, -errno for failure to send reply
  */
 int fuse_reply_statx(fuse_req_t req, int flags, struct statx *statx, double attr_timeout);

@@ -3190,6 +3190,9 @@ _Static_assert(offsetof(struct fuse_init_out, request_timeout) == 40 &&
 	       sizeof(struct fuse_init_out) == 64,
 	       "fuse_init_out must match the kernel's 7.43 layout");
 
+_Static_assert(FUSE_STATX_FLAG_LIGHT == FUSE_STATX_LIGHT,
+	       "statx flags are passed to the filesystem untranslated");
+
 /*
  * redfs kernels before protocol 7.43 have no request_timeout and read
  * align_page_order at its offset; 7.43 and later read it after the field.
