@@ -97,8 +97,15 @@ struct fuse_file_info {
 	    file */
 	uint32_t parallel_direct_writes : 1;
 
+	/** Set in release() when a read served from the page cache of the
+	    inode, through any open file, was not followed by a FUSE_READ,
+	    DLM read lock request, write, truncate, fallocate or explicit
+	    atime.  Reported once, by the first release after it; stamp
+	    atime on the inode. */
+	uint32_t cached_read : 1;
+
 	/** Padding.  Reserved for future use*/
-	uint32_t padding : 23;
+	uint32_t padding : 22;
 	uint32_t padding2 : 32;
 	uint32_t padding3 : 32;
 

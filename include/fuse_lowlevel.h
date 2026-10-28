@@ -745,6 +745,13 @@ struct fuse_lowlevel_ops {
 	 * fi->fh will contain the value set by the open method, or will
 	 * be undefined if the open method didn't set any value.
 	 * fi->flags will contain the same flags as for open.
+	 * fi->cached_read is set when a read(2), splice, sendfile or read
+	 * fault without O_NOATIME served from the page cache of the inode,
+	 * through any open file, was not followed by a FUSE_READ, DLM read
+	 * lock request, write, truncate, fallocate or explicit atime.
+	 * Reported once, by the first release after it, which may be that
+	 * of another handle, even a write-only one; stamp atime on the
+	 * inode, not on fi->fh.
 	 *
 	 * Valid replies:
 	 *   fuse_reply_err
