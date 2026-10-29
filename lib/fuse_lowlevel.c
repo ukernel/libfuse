@@ -235,28 +235,192 @@ static void destroy_req(fuse_req_t req)
 	free(req);
 }
 
+/*
+ * Selective interrupts
+ *
+ * RED-only (decision D3), a deliberate divergence from upstream libfuse,
+ * which puts every request on a list under se->lock and answers unmatched
+ * interrupts with EAGAIN. Here only a request that called
+ * fuse_req_interrupt_func() is on se->intr_list, linked through
+ * req->next/prev; a request that never registers takes no lock for
+ * interrupts. FUSE_INTERRUPT is matched by unique and never answered. An
+ * unmatched one is dropped, and its unique is kept in se->intr_recent (the
+ * last FUSE_INTR_RECENT_MAX) so that a request that registers later still
+ * sees it.
+ *
+ * Lock order is req->lock, then se->lock; no req->lock is ever taken with
+ * se->lock held. intr_deliver() finds the request under se->lock, drops
+ * se->lock, then takes req->lock and se->lock again and rechecks. Two
+ * request locks nest (A->lock, then B->lock) when A's callback registers a
+ * callback for request B or replies to B, which waits on B->lock. That is
+ * safe only if B's callback never does the same to A: callbacks must not
+ * reach each other's requests in a cycle.
+ *
+ * se->intr_list, se->intr_recent and intr_registered are under se->lock.
+ * intr_registered is written only by the thread that registers the
+ * callback or replies to the request, which may also read it unlocked.
+ *
+ * interrupted is written under both req->lock and se->lock and read under
+ * either. The uring CQE handler resets it without a lock before dispatch:
+ * a uring reply unregisters (fuse_req_intr_unregister()) before it commits
+ * the entry back to the kernel, so a new request in the entry starts off
+ * the list, and a stale intr_deliver() only rechecks it and writes nothing.
+ * For the same reason fuse_free_req() leaves a uring entry's registration
+ * alone: once committed, the entry may already carry the next request.
+ *
+ * ref_cnt: intr_deliver() and fuse_req_interrupt_func() hold a reference
+ * across a callback, so a heap request answered meanwhile stays allocated
+ * and whoever drops the last reference calls destroy_req(). fuse_free_req()
+ * decrements without se->lock; that relies on ref_cnt being _Atomic int in
+ * this fork (upstream's is a plain int under se->lock). A uring entry keeps
+ * a baseline reference of 1, so destroy_req() is never reached for it.
+ *
+ * Unregister-wait: callbacks run under req->lock. intr_unregister() takes
+ * the request off the list, then locks and unlocks req->lock, so once a
+ * reply returns no callback is running or can start, and its data may be
+ * freed. The thread running that very callback (intr_cb_req) skips the
+ * wait, which would deadlock on itself, so a callback may reply to its own
+ * request; not for io_uring requests, whose replies must come from the
+ * ring thread, never a /dev/fuse worker. Two consequences for filesystems:
+ * never reply while holding a lock the callback takes, and a callback must
+ * not reply to another request whose callback may be running.
+ */
+
+static _Thread_local struct fuse_req *intr_cb_req;
+
+static void intr_run_cb(struct fuse_req *req, fuse_interrupt_func_t func,
+			void *data)
+{
+	/*
+	 * Saved, not cleared: a callback may register an already interrupted
+	 * request, which runs that request's callback nested.
+	 */
+	struct fuse_req *prev = intr_cb_req;
+
+	intr_cb_req = req;
+	func(req, data);
+	intr_cb_req = prev;
+}
+
+/* Called with req->lock held. Returns whether req has been interrupted. */
+static int intr_register(struct fuse_req *req, fuse_interrupt_func_t func,
+			 void *data)
+{
+	struct fuse_session *se = req->se;
+	unsigned int i;
+	int interrupted;
+
+	pthread_mutex_lock(&se->lock);
+	req->u.ni.func = func;
+	req->u.ni.data = data;
+	if (func && !req->intr_registered) {
+		req->intr_registered = true;
+		list_add_req(req, &se->intr_list);
+		/* Unused slots hold 0, which is never a request's unique. */
+		for (i = 0; i < FUSE_INTR_RECENT_MAX; i++) {
+			if (se->intr_recent[i] == req->unique) {
+				req->interrupted = 1;
+				break;
+			}
+		}
+	}
+	interrupted = req->interrupted;
+	pthread_mutex_unlock(&se->lock);
+
+	return interrupted;
+}
+
+static void intr_unregister(struct fuse_req *req)
+{
+	struct fuse_session *se = req->se;
+
+	pthread_mutex_lock(&se->lock);
+	if (req->intr_registered) {
+		list_del_req(req);
+		req->intr_registered = false;
+	}
+	req->u.ni.func = NULL;
+	req->u.ni.data = NULL;
+	pthread_mutex_unlock(&se->lock);
+
+	/* The unregister-wait, see "Selective interrupts" */
+	if (intr_cb_req != req) {
+		pthread_mutex_lock(&req->lock);
+		pthread_mutex_unlock(&req->lock);
+	}
+}
+
+/*
+ * For the uring reply paths, which must unregister before the entry is
+ * committed back to the kernel. Called by the thread that replies.
+ */
+void fuse_req_intr_unregister(fuse_req_t req)
+{
+	if (req->intr_registered)
+		intr_unregister(req);
+}
+
+static void intr_deliver(struct fuse_session *se, uint64_t unique)
+{
+	fuse_interrupt_func_t func = NULL;
+	struct fuse_req *curr;
+	void *data = NULL;
+
+	pthread_mutex_lock(&se->lock);
+	for (curr = se->intr_list.next; curr != &se->intr_list;
+	     curr = curr->next) {
+		if (curr->unique == unique)
+			break;
+	}
+	if (curr == &se->intr_list) {
+		/*
+		 * Dropped without a reply: EAGAIN would make the kernel
+		 * requeue it forever, ENOSYS would turn interrupts off for
+		 * the connection.
+		 */
+		se->intr_recent[se->intr_recent_pos++ % FUSE_INTR_RECENT_MAX] =
+			unique;
+		pthread_mutex_unlock(&se->lock);
+		return;
+	}
+
+	/* See "Selective interrupts" for the reference and the recheck. */
+	curr->ref_cnt++;
+	pthread_mutex_unlock(&se->lock);
+	pthread_mutex_lock(&curr->lock);
+	pthread_mutex_lock(&se->lock);
+	if (curr->intr_registered && curr->unique == unique) {
+		curr->interrupted = 1;
+		func = curr->u.ni.func;
+		data = curr->u.ni.data;
+	}
+	pthread_mutex_unlock(&se->lock);
+	if (func)
+		intr_run_cb(curr, func, data);
+	pthread_mutex_unlock(&curr->lock);
+	if (!--curr->ref_cnt)
+		destroy_req(curr);
+}
+
 void fuse_free_req(fuse_req_t req)
 {
 	int ctr;
-	struct fuse_session *se = req->se;
 
 	free(req->secctx);
 	req->secctx = NULL;
 
-	if (se->conn.no_interrupt || req->is_uring) {
-		ctr = --req->ref_cnt;
-		fuse_chan_put(req->ch);
-		req->ch = NULL;
-	} else {
-		pthread_mutex_lock(&se->lock);
-		req->u.ni.func = NULL;
-		req->u.ni.data = NULL;
-		list_del_req(req);
-		ctr = --req->ref_cnt;
-		fuse_chan_put(req->ch);
-		req->ch = NULL;
-		pthread_mutex_unlock(&se->lock);
-	}
+	/*
+	 * Unlocked read, see "Selective interrupts". A uring reply has
+	 * unregistered before its commit, and the entry may already hold the
+	 * next request.
+	 */
+	if (!req->is_uring && req->intr_registered)
+		intr_unregister(req);
+
+	/* Before the reference goes: intr_deliver() may drop the last one. */
+	fuse_chan_put(req->ch);
+	req->ch = NULL;
+	ctr = --req->ref_cnt;
 	if (!ctr)
 		destroy_req(req);
 }
@@ -582,6 +746,9 @@ int fuse_reply_err(fuse_req_t req, int err)
 
 void fuse_reply_none(fuse_req_t req)
 {
+	/* No commit follows, and fuse_free_req() skips uring entries. */
+	if (req->is_uring)
+		fuse_req_intr_unregister(req);
 	fuse_free_req(req);
 }
 
@@ -2659,46 +2826,6 @@ static void do_dlm_lock(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 	_do_dlm_lock(req, nodeid, inarg, NULL);
 }
 
-static int find_interrupted(struct fuse_session *se, struct fuse_req *req)
-{
-	struct fuse_req *curr;
-
-	for (curr = se->list.next; curr != &se->list; curr = curr->next) {
-		if (curr->unique == req->u.i.unique) {
-			fuse_interrupt_func_t func;
-			void *data;
-
-			curr->ref_cnt++;
-			pthread_mutex_unlock(&se->lock);
-
-			/* Ugh, ugly locking */
-			pthread_mutex_lock(&curr->lock);
-			pthread_mutex_lock(&se->lock);
-			curr->interrupted = 1;
-			func = curr->u.ni.func;
-			data = curr->u.ni.data;
-			pthread_mutex_unlock(&se->lock);
-			if (func)
-				func(curr, data);
-			pthread_mutex_unlock(&curr->lock);
-
-			pthread_mutex_lock(&se->lock);
-			curr->ref_cnt--;
-			if (!curr->ref_cnt) {
-				destroy_req(curr);
-			}
-
-			return 1;
-		}
-	}
-	for (curr = se->interrupts.next; curr != &se->interrupts;
-	     curr = curr->next) {
-		if (curr->u.i.unique == req->u.i.unique)
-			return 1;
-	}
-	return 0;
-}
-
 static void _do_interrupt(fuse_req_t req, const fuse_ino_t nodeid,
 			  const void *op_in, const void *in_payload)
 {
@@ -2711,45 +2838,20 @@ static void _do_interrupt(fuse_req_t req, const fuse_ino_t nodeid,
 		fuse_log(FUSE_LOG_DEBUG, "INTERRUPT: %llu\n",
 			(unsigned long long) arg->unique);
 
-	req->u.i.unique = arg->unique;
+	intr_deliver(se, arg->unique);
 
-	pthread_mutex_lock(&se->lock);
-	if (find_interrupted(se, req)) {
-		fuse_chan_put(req->ch);
-		req->ch = NULL;
-		destroy_req(req);
-	} else
-		list_add_req(req, &se->interrupts);
-	pthread_mutex_unlock(&se->lock);
+	/*
+	 * Never answered. The kernel queues interrupts on /dev/fuse even for
+	 * requests sent over io-uring, so req is not a uring entry here.
+	 */
+	assert(!req->is_uring);
+	fuse_chan_put(req->ch);
+	req->ch = NULL;
+	destroy_req(req);
 }
 static void do_interrupt(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 {
 	_do_interrupt(req, nodeid, inarg, NULL);
-}
-
-static struct fuse_req *check_interrupt(struct fuse_session *se,
-					struct fuse_req *req)
-{
-	struct fuse_req *curr;
-
-	for (curr = se->interrupts.next; curr != &se->interrupts;
-	     curr = curr->next) {
-		if (curr->u.i.unique == req->unique) {
-			req->interrupted = 1;
-			list_del_req(curr);
-			fuse_chan_put(curr->ch);
-			curr->ch = NULL;
-			destroy_req(curr);
-			return NULL;
-		}
-	}
-	curr = se->interrupts.next;
-	if (curr != &se->interrupts) {
-		list_del_req(curr);
-		list_init_req(curr);
-		return curr;
-	} else
-		return NULL;
 }
 
 static void _do_bmap(fuse_req_t req, const fuse_ino_t nodeid, const void *op_in,
@@ -3931,12 +4033,15 @@ void fuse_req_interrupt_func(fuse_req_t req, fuse_interrupt_func_t func,
 			     void *data)
 {
 	pthread_mutex_lock(&req->lock);
-	pthread_mutex_lock(&req->se->lock);
-	req->u.ni.func = func;
-	req->u.ni.data = data;
-	pthread_mutex_unlock(&req->se->lock);
-	if (req->interrupted && func)
-		func(req, data);
+	if (intr_register(req, func, data) && func) {
+		/* The callback may reply; see "Selective interrupts". */
+		req->ref_cnt++;
+		intr_run_cb(req, func, data);
+		pthread_mutex_unlock(&req->lock);
+		if (!--req->ref_cnt)
+			destroy_req(req);
+		return;
+	}
 	pthread_mutex_unlock(&req->lock);
 }
 
@@ -4395,15 +4500,6 @@ void fuse_session_process_buf_internal(struct fuse_session *se,
 		if (se->debug)
 			fuse_log(FUSE_LOG_DEBUG, "FUSE_INTERRUPT: reply to kernel to disable interrupt\n");
 		goto reply_err;
-	}
-	if (!se->conn.no_interrupt && in->opcode != FUSE_INTERRUPT) {
-		struct fuse_req *intr;
-		pthread_mutex_lock(&se->lock);
-		intr = check_interrupt(se, req);
-		list_add_req(req, &se->list);
-		pthread_mutex_unlock(&se->lock);
-		if (intr)
-			fuse_reply_err(intr, EAGAIN);
 	}
 
 	if ((buf->flags & FUSE_BUF_IS_FD) && write_header_size < buf->size &&
@@ -4925,8 +5021,7 @@ fuse_session_new_versioned(struct fuse_args *args,
 	if (se->debug)
 		fuse_log(FUSE_LOG_DEBUG, "FUSE library version: %s\n", PACKAGE_VERSION);
 
-	list_init_req(&se->list);
-	list_init_req(&se->interrupts);
+	list_init_req(&se->intr_list);
 	list_init_nreq(&se->notify_list);
 	se->notify_ctr = 1;
 	pthread_mutex_init(&se->lock, NULL);

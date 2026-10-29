@@ -18,6 +18,7 @@
 #include "fuse_uring_i.h"
 #include "util.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <liburing.h>
 #include <sys/sysinfo.h>
@@ -164,6 +165,13 @@ static int fuse_uring_commit_sqe(struct fuse_ring_pool *ring_pool,
 	struct fuse_out_header *out = (struct fuse_out_header *)&rrh->in_out;
 	struct fuse_uring_ent_in_out *ent_in_out =
 		(struct fuse_uring_ent_in_out *)&rrh->ring_ent_in_out;
+
+	/*
+	 * Every uring reply path commits here. Unregister first: once
+	 * committed, the kernel may put the next request in this entry, and
+	 * no callback may run after the reply returns.
+	 */
+	fuse_req_intr_unregister(&ring_ent->req);
 
 	struct io_uring_sqe *sqe = io_uring_get_sqe(&queue->ring);
 	if (sqe == NULL) {
@@ -361,6 +369,12 @@ fuse_uring_handle_cqe(struct fuse_ring_queue *queue,
 	req->is_uring = true;
 	req->ref_cnt++;
 	req->ch = NULL; /* not needed for uring */
+
+	/* The previous request unregistered before its commit */
+	assert(!req->intr_registered);
+	req->interrupted = 0;
+	req->u.ni.func = NULL;
+	req->u.ni.data = NULL;
 
 	fuse_session_process_uring_cqe(fuse_ring->se, req, in, &rrh->op_in,
 				       ent->op_payload, ent_in_out->payload_sz);

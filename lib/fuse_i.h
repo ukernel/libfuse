@@ -33,6 +33,9 @@
 })
 #endif
 
+/* Unmatched FUSE_INTERRUPTs remembered for a later fuse_req_interrupt_func() */
+#define FUSE_INTR_RECENT_MAX 64
+
 struct fuse_ring_pool;
 
 struct fuse_req;
@@ -66,16 +69,21 @@ struct fuse_req {
 	unsigned int is_compound : 1;
 	union {
 		struct {
-			uint64_t unique;
-		} i;
-		struct {
 			fuse_interrupt_func_t func;
 			void *data;
 		} ni;
 	} u;
 
+	/* Links on se->intr_list while intr_registered is set */
 	struct fuse_req *next;
 	struct fuse_req *prev;
+
+	/*
+	 * Set while the request is on se->intr_list. Written under se->lock,
+	 * only by the thread that registers the callback or replies; see
+	 * "Selective interrupts" in fuse_lowlevel.c.
+	 */
+	bool intr_registered;
 
 	bool is_uring;
 	struct fuse_compound_ctx compound;
@@ -128,8 +136,10 @@ struct fuse_session {
 	void *userdata;
 	uid_t owner;
 	struct fuse_conn_info conn;
-	struct fuse_req list;
-	struct fuse_req interrupts;
+	struct fuse_req intr_list;	/* requests with an intr callback */
+	/* Uniques of the last unmatched interrupts, under se->lock */
+	uint64_t intr_recent[FUSE_INTR_RECENT_MAX];
+	unsigned int intr_recent_pos;
 	pthread_mutex_t lock;
 	int got_destroy;
 	pthread_key_t pipe_key;
@@ -275,6 +285,7 @@ int fuse_kern_do_mount(const char *mountpoint, struct mount_opts *mo,
 int fuse_send_reply_iov_nofree(fuse_req_t req, int error, struct iovec *iov,
 			       int count);
 void fuse_free_req(fuse_req_t req);
+void fuse_req_intr_unregister(fuse_req_t req);
 
 void _cuse_lowlevel_init(fuse_req_t req, const fuse_ino_t nodeid,
 			 const void *req_header, const void *req_payload);

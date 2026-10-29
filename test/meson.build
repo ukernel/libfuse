@@ -22,6 +22,14 @@ td += executable('test_want_conversion', 'test_want_conversion.c',
 td += executable('test_signals', 'test_signals.c',
                  dependencies: [ libfuse_dep, thread_dep ],
                  install: false)
+td += executable('test_intr_ll', 'test_intr_ll.c',
+                 dependencies: [ libfuse_dep, thread_dep ],
+                 install: false)
+td += executable('test_intr', 'test_intr.c',
+                 include_directories: include_dirs,
+                 link_with: [ libfuse ],
+                 dependencies: thread_dep,
+                 install: false)
 td += executable('test_teardown_watchdog', 'test_teardown_watchdog.c',
                  dependencies: [ libfuse_dep, thread_dep ],
                  install: false)

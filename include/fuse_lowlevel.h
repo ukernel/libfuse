@@ -2274,8 +2274,21 @@ typedef void (*fuse_interrupt_func_t)(fuse_req_t req, void *data);
  * Register/unregister callback for an interrupt
  *
  * If an interrupt has already happened, then the callback function is
- * called from within this function, hence it's not possible for
- * interrupts to be lost.
+ * called from within this function.
+ *
+ * RED libfuse (selective interrupts, decision D3): only requests that
+ * registered a callback here are matched against FUSE_INTERRUPT; for any
+ * other request the interrupt is dropped without a reply. An interrupt
+ * that arrives before this call is remembered only among the last 64
+ * dropped interrupts, so a request should register before it starts to
+ * wait.
+ *
+ * The callback runs under a per-request lock, and replying to the request
+ * waits until a running callback has returned. A callback may reply to its
+ * own request, but not for io_uring requests: their replies must come from
+ * the ring thread. Hence never reply while holding a lock the callback takes,
+ * and never reply from a callback to another request whose callback may be
+ * running: either deadlocks.
  *
  * @param req request handle
  * @param func the callback function or NULL for unregister
@@ -2286,6 +2299,10 @@ void fuse_req_interrupt_func(fuse_req_t req, fuse_interrupt_func_t func,
 
 /**
  * Check if a request has already been interrupted
+ *
+ * RED libfuse (decision D3): only a request that registered a callback
+ * with fuse_req_interrupt_func() is ever marked interrupted, so this
+ * returns 0 for any other request.
  *
  * @param req request handle
  * @return 1 if the request has been interrupted, 0 otherwise
