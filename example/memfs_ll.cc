@@ -1964,7 +1964,7 @@ static void memfs_statx(fuse_req_t req, fuse_ino_t ino,
 //
 // Taking over the ring threads also means libfuse no longer joins them or
 // frees the ring pool in fuse_uring_stop() -- memfs_join_ring_threads() does
-// the joining, the pool is only released when the daemon exits.
+// the joining, fuse_session_destroy() frees the pool.
 static std::vector<std::thread> memfs_ring_threads;
 
 // Body of one ring thread: register the queue, then hand replies to the kernel

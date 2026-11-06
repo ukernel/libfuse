@@ -257,6 +257,10 @@ struct fuse_lowlevel_ops {
 	 * per queue, when external queue threads are demanded, the file system
 	 * implementation has to do that.
 	 *
+	 * fuse_session_destroy() frees ring_pool along with the requests in
+	 * it. The threads have to be done with the queues by then; the
+	 * destroy() handler, called first, may still stop them.
+	 *
 	 * @param qid    queue identifier
 	 * @param ring_pool The ring object holding all fuse-ring quues.
 	 * @param queue_init queue initialization callback into libfuse

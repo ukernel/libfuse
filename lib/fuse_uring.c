@@ -946,13 +946,38 @@ int fuse_uring_stop(struct fuse_session *se)
 		}
 	}
 
-	/* API bug workaround - no control when the queues are needed */
+	/*
+	 * External threads may still be in the queues and libfuse cannot tell
+	 * when they are done - fuse_uring_destroy() releases their pool.
+	 */
 	if (!se->op.init_ring_ext_threads) {
 		free(ring->queues);
 		free(ring);
+		se->uring.pool = NULL;
 	}
 
 	return 0;
+}
+
+/*
+ * Release the pool fuse_uring_stop() left to external ring threads. Called by
+ * fuse_session_destroy(): the file system has to be done with its queues by
+ * then, as every ring entry refers to the session.
+ */
+void fuse_uring_destroy(struct fuse_session *se)
+{
+	struct fuse_ring_pool *ring = se->uring.pool;
+
+	/*
+	 * libfuse's own ring threads are joined and their pool released by
+	 * fuse_uring_stop(); without that they may still be running.
+	 */
+	if (ring == NULL || !se->op.init_ring_ext_threads)
+		return;
+
+	free(ring->queues);
+	free(ring);
+	se->uring.pool = NULL;
 }
 
 void fuse_uring_set_payload_allocator(

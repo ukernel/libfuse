@@ -4650,6 +4650,8 @@ void fuse_session_destroy(struct fuse_session *se)
 		if (se->op.destroy)
 			se->op.destroy(se->userdata);
 	}
+	/* After destroy(): the file system may stop its ring threads there */
+	fuse_uring_destroy(se);
 	llp = pthread_getspecific(se->pipe_key);
 	if (llp != NULL)
 		fuse_ll_pipe_free(llp);

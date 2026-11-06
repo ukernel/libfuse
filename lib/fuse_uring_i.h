@@ -27,3 +27,4 @@ void fuse_session_process_uring_cqe(struct fuse_session *se,
 
 int fuse_uring_start(struct fuse_session *se);
 int fuse_uring_stop(struct fuse_session *se);
+void fuse_uring_destroy(struct fuse_session *se);
