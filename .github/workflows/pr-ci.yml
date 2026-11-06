@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: '${{ matrix.os }}'
+    runs-on: '${{ matrix.runner || matrix.os }}'
     strategy:
       # One configuration failing must not cancel its siblings.
       fail-fast: false
@@ -70,11 +70,16 @@ jobs:
           - config: gcc-valgrind
             cc: gcc
             valgrind: true
+          # Ubuntu 26.04 (ubuntu-latest) ships neither gcc-9 nor gcc-10.
+          # include can't overwrite the matrix's own os, so a separate
+          # runner key picks the older image for these two.
           - config: gcc-9-valgrind
             cc: gcc-9
+            runner: ubuntu-24.04
             valgrind: true
           - config: gcc-10-valgrind
             cc: gcc-10
+            runner: ubuntu-24.04
             valgrind: true
             meson_opts:
               - -Dc_args=-flto=auto

@@ -50,12 +50,21 @@ install_full() {
     sudo dpkg --add-architecture i386
 
     sudo apt-get update
+
+    # Older compilers are only packaged on older releases (26.04 dropped
+    # gcc-9 and gcc-10); install whichever this image still has.
+    old_gcc=()
+    for pkg in gcc-9 gcc-10; do
+        if apt-cache show "$pkg" > /dev/null 2>&1; then
+            old_gcc+=("$pkg")
+        fi
+    done
+
     sudo apt-get install -y \
         clang \
         doxygen \
         gcc \
-        gcc-10 \
-        gcc-9 \
+        "${old_gcc[@]}" \
         gdb \
         valgrind \
         gcc-multilib \
