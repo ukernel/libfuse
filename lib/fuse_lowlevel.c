@@ -3185,6 +3185,25 @@ static void report_init_test_status(struct fuse_session *se, int ring_rc)
 #undef EMIT_INIT_STATUS_LINE
 }
 
+_Static_assert(offsetof(struct fuse_init_out, request_timeout) == 40 &&
+	       offsetof(struct fuse_init_out, align_page_order) == 42 &&
+	       sizeof(struct fuse_init_out) == 64,
+	       "fuse_init_out must match the kernel's 7.43 layout");
+
+/*
+ * redfs kernels before protocol 7.43 have no request_timeout and read
+ * align_page_order at its offset; 7.43 and later read it after the field.
+ */
+static void init_out_set_align_page_order(struct fuse_init_out *out,
+					  uint32_t kernel_minor, uint8_t order)
+{
+	if (kernel_minor >= 43)
+		out->align_page_order = order;
+	else
+		((uint8_t *)out)[offsetof(struct fuse_init_out,
+					  request_timeout)] = order;
+}
+
 /* Prevent bogus data races (bogus since "init" is called before
  * multi-threading becomes relevant */
 static __attribute__((no_sanitize("thread"))) void
@@ -3492,7 +3511,8 @@ _do_init(fuse_req_t req, const fuse_ino_t nodeid, const void *op_in,
 
 	if (se->conn.align_page_order) {
 		outargflags |= FUSE_ALIGN_PG_ORDER;
-		outarg.align_page_order = se->conn.align_page_order;
+		init_out_set_align_page_order(&outarg, arg->minor,
+					      se->conn.align_page_order);
 	}
 
 	if (inargflags & FUSE_URING_REDUCED_Q) {
@@ -3533,9 +3553,9 @@ _do_init(fuse_req_t req, const fuse_ino_t nodeid, const void *op_in,
 		if (se->conn.want_ext & FUSE_CAP_PASSTHROUGH)
 			fuse_log(FUSE_LOG_DEBUG, "   max_stack_depth=%u\n",
 				outarg.max_stack_depth);
-		if ((outargflags & FUSE_ALIGN_PG_ORDER) && outarg.align_page_order)
+		if (outargflags & FUSE_ALIGN_PG_ORDER)
 			fuse_log(FUSE_LOG_DEBUG, "   align_page_mask=0x%08x\n",
-				1 << outarg.align_page_order);
+				1 << se->conn.align_page_order);
 	}
 	if (arg->minor < 5)
 		outargsize = FUSE_COMPAT_INIT_OUT_SIZE;

@@ -950,7 +950,9 @@ struct fuse_init_in {
 #define FUSE_COMPAT_22_INIT_OUT_SIZE 24
 
 /*
- * align_page_order: Number of pages for optimal IO, or a multiple of that
+ * request_timeout: upstream 7.43 field, laid out as in the kernel.
+ * align_page_order: Number of pages for optimal IO, or a multiple of that.
+ *   Kernels before 7.43 have no request_timeout and take it at that offset.
  */
 struct fuse_init_out {
 	uint32_t	major;
@@ -965,9 +967,10 @@ struct fuse_init_out {
 	uint16_t	map_alignment;
 	uint32_t	flags2;
 	uint32_t	max_stack_depth;
+	uint16_t	request_timeout;
 	uint8_t		align_page_order;
-	uint8_t		padding[3];
-	uint32_t	unused[5];
+	uint8_t		padding;
+	uint16_t	unused[10];
 };
 
 #define CUSE_INIT_INFO_MAX 4096
