@@ -444,8 +444,8 @@ struct fuse_file_lock {
  * FUSE_OVER_IO_URING: Indicate that client supports io-uring
  * FUSE_INVAL_INODE_ENTRY: invalidate inode aliases when doing inode invalidation
  * FUSE_EXPIRE_INODE_ENTRY: expire inode aliases when doing inode invalidation
- * FUSE_ALIGN_PG_ORDER: page order (power of 2 exponent for number of pages) for
- *			optimal io-size alignment
+ * FUSE_ALIGN_PG_ORDER: init_out.align_page_order holds the log2 of the optimal
+ *			io-size alignment in bytes
  * FUSE_URING_REDUCED_Q: Client (kernel) supports less queues - Server is free
  *			 to register between 1 and nr-core io-uring queues
  * FUSE_SETATTR_WRITEBACK: kernel marks writeback-initiated SETATTR requests
@@ -972,7 +972,8 @@ struct fuse_init_in {
 
 /*
  * request_timeout: upstream 7.43 field, laid out as in the kernel.
- * align_page_order: Number of pages for optimal IO, or a multiple of that.
+ * align_page_order: log2 of the IO alignment in bytes; the kernel shifts it
+ *   down by PAGE_SHIFT into pages, and ignores an order below PAGE_SHIFT.
  *   Kernels before 7.43 have no request_timeout and take it at that offset.
  */
 struct fuse_init_out {
