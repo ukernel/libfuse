@@ -896,6 +896,41 @@ int fuse_reply_dlm_lock(fuse_req_t req, uint64_t start, uint64_t end)
 	return send_reply_ok(req, &arg, sizeof(arg));
 }
 
+/*
+ * FUSE_DLM_WB_LOCK write reply on a connection with FUSE_QUOTA_LEASE: the
+ * lock part, then the lease part. One buffer, because the io-uring and
+ * compound reply paths take a single contiguous argument.
+ */
+struct fuse_dlm_lock_lease_out {
+	struct fuse_dlm_lock_out	lock;
+	struct fuse_quota_lease		lease;
+};
+
+_Static_assert(sizeof(struct fuse_quota_lease) == 40,
+	       "fuse_quota_lease must match the kernel layout");
+_Static_assert(sizeof(struct fuse_dlm_lock_lease_out) == 64,
+	       "DLM lock lease reply must match the kernel layout");
+
+int fuse_reply_dlm_lock_lease(fuse_req_t req, uint64_t start, uint64_t end,
+			      const struct fuse_quota_lease *lease)
+{
+	struct fuse_dlm_lock_lease_out arg;
+
+	memset(&arg, 0, sizeof(arg));
+	arg.lock.start = start;
+	arg.lock.end = end;
+	arg.lease = *lease;
+
+	return send_reply_ok(req, &arg, sizeof(arg));
+}
+
+int fuse_reply_quota_lease(fuse_req_t req, const struct fuse_quota_lease *lease)
+{
+	struct fuse_quota_lease arg = *lease;
+
+	return send_reply_ok(req, &arg, sizeof(arg));
+}
+
 int fuse_reply_attr(fuse_req_t req, const struct stat *attr,
 		    double attr_timeout)
 {
@@ -2816,6 +2851,7 @@ static void _do_dlm_lock(fuse_req_t req, const fuse_ino_t nodeid,
 
 	memset(&fi, 0, sizeof(fi));
 	fi.fh = arg->fh;
+	fi.flags = arg->flags;
 
 	if (req->se->op.dlm_lock) {
 		req->se->op.dlm_lock(req, nodeid, arg->start, arg->end, arg->type, &fi);
@@ -2826,6 +2862,23 @@ static void _do_dlm_lock(fuse_req_t req, const fuse_ino_t nodeid,
 static void do_dlm_lock(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 {
 	_do_dlm_lock(req, nodeid, inarg, NULL);
+}
+
+static void _do_quota_admit(fuse_req_t req, const fuse_ino_t nodeid,
+			    const void *inarg, const void *in_payload)
+{
+	(void)in_payload;
+	const struct fuse_quota_admit_in *arg = inarg;
+
+	if (req->se->op.quota_admit)
+		req->se->op.quota_admit(req, nodeid, arg->flags);
+	else
+		fuse_reply_err(req, ENOSYS);
+}
+
+static void do_quota_admit(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
+{
+	_do_quota_admit(req, nodeid, inarg, NULL);
 }
 
 static void _do_interrupt(fuse_req_t req, const fuse_ino_t nodeid,
@@ -3192,6 +3245,8 @@ _Static_assert(offsetof(struct fuse_init_out, request_timeout) == 40 &&
 	       sizeof(struct fuse_init_out) == 64,
 	       "fuse_init_out must match the kernel's 7.43 layout");
 
+_Static_assert(FUSE_LL_DLM_LOCK_NO_ADMIT == FUSE_DLM_LOCK_NO_ADMIT,
+	       "the dlm_lock flag must match the wire bit");
 _Static_assert(FUSE_STATX_FLAG_LIGHT == FUSE_STATX_LIGHT,
 	       "statx flags are passed to the filesystem untranslated");
 
@@ -3335,6 +3390,10 @@ _do_init(fuse_req_t req, const fuse_ino_t nodeid, const void *op_in,
 			se->conn.capable_ext |= FUSE_CAP_SECURITY_CTX;
 		if (inargflags & FUSE_SETATTR_WRITEBACK)
 			se->conn.capable_ext |= FUSE_CAP_SETATTR_WRITEBACK;
+		if (inargflags & FUSE_QUOTA_LEASE)
+			se->conn.capable_ext |= FUSE_CAP_QUOTA_LEASE;
+		if (inargflags & FUSE_QUOTA_ENABLED)
+			se->conn.capable_ext |= FUSE_CAP_QUOTA_ENABLED;
 	} else {
 		se->conn.max_readahead = 0;
 	}
@@ -3513,6 +3572,10 @@ _do_init(fuse_req_t req, const fuse_ino_t nodeid, const void *op_in,
 		outargflags |= FUSE_SECURITY_CTX;
 	if (se->conn.want_ext & FUSE_CAP_SETATTR_WRITEBACK)
 		outargflags |= FUSE_SETATTR_WRITEBACK;
+	if (se->conn.want_ext & FUSE_CAP_QUOTA_LEASE)
+		outargflags |= FUSE_QUOTA_LEASE;
+	if (se->conn.want_ext & FUSE_CAP_QUOTA_ENABLED)
+		outargflags |= FUSE_QUOTA_ENABLED;
 
 	if (se->conn.align_page_order) {
 		outargflags |= FUSE_ALIGN_PG_ORDER;
@@ -4140,6 +4203,7 @@ static struct {
 	[FUSE_DLM_WB_LOCK] = { do_dlm_lock,	"DLM_WB_LOCK" },
 	[FUSE_COMPOUND]	   = { do_compound,    "COMPOUND"    },
 	[FUSE_LOOKUPX]	   = { do_lookupx,     "LOOKUPX"     },
+	[FUSE_QUOTA_ADMIT] = { do_quota_admit,	"QUOTA_ADMIT" },
 	[CUSE_INIT]	   = { cuse_lowlevel_init, "CUSE_INIT"   },
 };
 
@@ -4198,6 +4262,7 @@ static struct {
 	[FUSE_COMPOUND]		= { _do_compound,	"COMPOUND" },
 	[FUSE_DLM_WB_LOCK]	= { _do_dlm_lock,	"DLM_WB_LOCK" },
 	[FUSE_LOOKUPX]		= { _do_lookupx,	"LOOKUPX" },
+	[FUSE_QUOTA_ADMIT]	= { _do_quota_admit,	"QUOTA_ADMIT" },
 	[CUSE_INIT]		= { _cuse_lowlevel_init, "CUSE_INIT" },
 };
 

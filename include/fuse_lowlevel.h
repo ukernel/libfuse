@@ -54,6 +54,50 @@ typedef struct fuse_req *fuse_req_t;
 struct statx;
 
 /**
+ * struct fuse_quota_lease - quota admission lease, see FUSE_CAP_QUOTA_LEASE
+ * @lease_id:	0: no lease, see @flags (FUSE_QLEASE_QUOTA_OFF) and @error
+ * @tsd_seq:	mint GTX (qvi_seq) of the TSD voucher the part was decided from
+ * @ug_seq:	mint GTX of the UG voucher it was decided from; unused with
+ *		FUSE_QLEASE_NO_UG
+ * @ttl_ms:	lease_id != 0: > 0, admits writes for this long after the reply
+ * @flags:	FUSE_QLEASE_REJECTED: the owner is over quota;
+ *		FUSE_QLEASE_QUOTA_OFF: reserved; set on every lease part while
+ *		quota is off, with lease_id and ttl_ms 0; the kernel accepts it
+ *		and changes no lease and no state, since the quota state is
+ *		fixed at INIT (FUSE_CAP_QUOTA_ENABLED);
+ *		FUSE_QLEASE_NO_UG: decided without a UG voucher (a per-dataset
+ *		lease, or a per-owner lease admitted on TSD alone)
+ * @error:	lease_id == 0 without FUSE_QLEASE_QUOTA_OFF: negative errno,
+ *		-EAGAIN when the voucher reached the margin while the lock was
+ *		taken; 0 otherwise
+ * @reserved:	0
+ *
+ * The seqs order the replies for one lease: a reply is newer than the
+ * state the kernel holds when neither seq it used is older and at least
+ * one is newer. A reply that is newer in one seq and older in the other
+ * was decided from vouchers of different ages and is not applied over a
+ * valid lease.
+ *
+ * The redfs kernel module defines the same 40-byte layout in its own header.
+ */
+struct fuse_quota_lease {
+	uint64_t	lease_id;
+	uint64_t	tsd_seq;
+	uint64_t	ug_seq;
+	int32_t		ttl_ms;
+	uint32_t	flags;
+	int32_t		error;
+	uint32_t	reserved;
+};
+
+#define FUSE_QLEASE_REJECTED	(1 << 0)
+#define FUSE_QLEASE_QUOTA_OFF	(1 << 1)
+#define FUSE_QLEASE_NO_UG	(1 << 2)
+
+/* quota_admit flags, see struct fuse_quota_admit_in */
+#define FUSE_QADMIT_RENEW	(1 << 0)
+
+/**
  * Session
  *
  * This provides hooks for processing requests, and exiting
@@ -201,6 +245,15 @@ enum fuse_ll_dlm_lock_type {
 	FUSE_LL_DLM_LOCK_WRITE = 2,
 	FUSE_LL_DLM_PAGE_MKWRITE = 3,
 };
+
+/*
+ * Flag of a dlm_lock request, in fi->flags: a write lock that admits no
+ * write (grant-ahead, a load fault in a shared-writable mapping). On a
+ * FUSE_CAP_QUOTA_LEASE connection reply with an empty lease part and look
+ * up no owner and no voucher. Shares the value of the FUSE_DLM_LOCK_NO_ADMIT
+ * wire bit, so it needs no translation.
+ */
+#define FUSE_LL_DLM_LOCK_NO_ADMIT	(1U << 0)
 
 #define FUSE_LOOKUPX_FOR_REVALIDATE (1 << 0)
 #define FUSE_LOOKUPX_TARGET_WAS_DIR (1 << 1)
@@ -1441,6 +1494,9 @@ struct fuse_lowlevel_ops {
 	 * filesystems if multiple clients write into the same file.
 	 * The actual problem arises when the kernel reads this pages to prepare
 	 * unaligned writes.
+	 *
+	 * fi->flags carries the request flags (FUSE_LL_DLM_LOCK_NO_ADMIT);
+	 * fi->fh is the file handle.
 	 */
 	void (*dlm_lock) (fuse_req_t req, fuse_ino_t ino, uint64_t start, uint64_t end,
 			uint32_t type, struct fuse_file_info *fi);
@@ -1475,6 +1531,37 @@ struct fuse_lowlevel_ops {
 	 */
 	void (*lookupx) (fuse_req_t req, fuse_ino_t parent, const char *name,
 			 uint32_t flags);
+
+	/**
+	 * Admit writes against a quota admission lease for the owner of @ino.
+	 *
+	 * Only sent on a connection that negotiated FUSE_CAP_QUOTA_LEASE.
+	 * Without FUSE_QADMIT_RENEW in @flags it is a first admission: the
+	 * inode's write grant is cached but the inode has no lease. Refresh
+	 * the owner's voucher only when it has expired or is missing, as
+	 * for a write lock request. With FUSE_QADMIT_RENEW it renews a
+	 * lease, after the kernel started writeback of the lease's linked
+	 * inodes: always refresh the voucher before answering.
+	 *
+	 * When quota is off, reply with a lease that carries the reserved
+	 * FUSE_QLEASE_QUOTA_OFF, not with an error.
+	 *
+	 * For an owner over quota, reply, for a first admission and a
+	 * renewal alike, with the owner's lease carrying
+	 * FUSE_QLEASE_REJECTED and its voucher seqs, as a lock reply does,
+	 * not with EDQUOT: an error carries no seqs, so the kernel could
+	 * not order it against a newer lock reply. The kernel still
+	 * accepts EDQUOT for a renewal from an older server.
+	 *
+	 * Valid replies:
+	 *   fuse_reply_quota_lease
+	 *   fuse_reply_err
+	 *
+	 * @param req request handle
+	 * @param ino the inode number
+	 * @param flags FUSE_QADMIT_RENEW for a renewal, 0 otherwise
+	 */
+	void (*quota_admit)(fuse_req_t req, fuse_ino_t ino, uint32_t flags);
 };
 
 /**
@@ -1752,6 +1839,28 @@ int fuse_reply_lock(fuse_req_t req, const struct flock *lock);
  * @param locksize the locked size
  */
 int fuse_reply_dlm_lock(fuse_req_t req, uint64_t start, uint64_t end);
+
+/**
+ * Reply to a write-mode DLM lock request with a quota lease part.
+ *
+ * Only for a write lock reply on a connection that negotiated
+ * FUSE_CAP_QUOTA_LEASE; otherwise use fuse_reply_dlm_lock.
+ *
+ * @param req request handle
+ * @param start start of the locked range
+ * @param end end of the locked range
+ * @param lease the lease part, must not be NULL
+ */
+int fuse_reply_dlm_lock_lease(fuse_req_t req, uint64_t start, uint64_t end,
+			      const struct fuse_quota_lease *lease);
+
+/**
+ * Reply to a quota_admit request.
+ *
+ * @param req request handle
+ * @param lease the lease, must not be NULL
+ */
+int fuse_reply_quota_lease(fuse_req_t req, const struct fuse_quota_lease *lease);
 
 /**
  * Reply with block index

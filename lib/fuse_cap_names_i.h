@@ -65,6 +65,8 @@ static const struct fuse_cap_name fuse_cap_names[] = {
 	{ FUSE_CAP_INVAL_INODE_ENTRY,		"FUSE_CAP_INVAL_INODE_ENTRY"},
 	{ FUSE_CAP_EXPIRE_INODE_ENTRY,		"FUSE_CAP_EXPIRE_INODE_ENTRY"},
 	{ FUSE_CAP_SETATTR_WRITEBACK,		"FUSE_CAP_SETATTR_WRITEBACK"},
+	{ FUSE_CAP_QUOTA_LEASE,			"FUSE_CAP_QUOTA_LEASE"},
+	{ FUSE_CAP_QUOTA_ENABLED,		"FUSE_CAP_QUOTA_ENABLED"},
 	// Add any new capabilities here
 	{ 0, NULL} // Sentinel to mark the end of the array
 };

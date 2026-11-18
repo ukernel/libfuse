@@ -239,6 +239,8 @@ FUSE_3.19 {
 		fuse_session_set_debug;
 		fuse_session_set_sync_init;
 		fuse_reply_lookupx;
+		fuse_reply_dlm_lock_lease;
+		fuse_reply_quota_lease;
 		fuse_req_secctx_count;
 		fuse_req_secctx_reset;
 		fuse_req_secctx_next;

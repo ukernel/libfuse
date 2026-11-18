@@ -533,6 +533,23 @@ struct fuse_loop_config_v1 {
 #define FUSE_CAP_OVER_IO_URING (1ULL << 31)
 
 /**
+ * Indicates that the kernel admits writeback-cache writes against quota
+ * leases (FUSE_QUOTA_LEASE). Disabled by default; enable with
+ * fuse_set_feature_flag() when the filesystem supports quota leases.
+ * Whether quota is on is given by FUSE_CAP_QUOTA_ENABLED.
+ */
+#define FUSE_CAP_QUOTA_LEASE (1ULL << 56)
+
+/**
+ * Indicates that quota is enabled for the session (FUSE_QUOTA_ENABLED).
+ * Offered by the kernel together with FUSE_CAP_QUOTA_LEASE. Enable it with
+ * fuse_set_feature_flag() only together with FUSE_CAP_QUOTA_LEASE and only
+ * when quota is enabled; without it the session has quota off. The kernel
+ * records the state once at INIT and never changes it.
+ */
+#define FUSE_CAP_QUOTA_ENABLED (1ULL << 55)
+
+/**
  * Indicates that the kernel marks SETATTR requests that originate from
  * writeback of locally owned attributes (->write_inode()) with
  * FATTR_WRITEBACK, surfaced to the filesystem as FUSE_SET_ATTR_WRITEBACK.

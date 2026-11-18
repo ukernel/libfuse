@@ -450,6 +450,12 @@ struct fuse_file_lock {
  *			 to register between 1 and nr-core io-uring queues
  * FUSE_SETATTR_WRITEBACK: kernel marks writeback-initiated SETATTR requests
  *			   with FATTR_WRITEBACK
+ * FUSE_QUOTA_LEASE: kernel admits writeback-cache writes against quota
+ *		     leases; write lock replies carry struct fuse_quota_lease
+ *		     and FUSE_QUOTA_ADMIT admits or renews a lease
+ * FUSE_QUOTA_ENABLED: offered with FUSE_QUOTA_LEASE; set in the reply, only
+ *		       together with FUSE_QUOTA_LEASE, when quota is enabled
+ *		       for the mount; the session's quota state is fixed at INIT
  */
 #define FUSE_ASYNC_READ		(1 << 0)
 #define FUSE_POSIX_LOCKS	(1 << 1)
@@ -499,6 +505,8 @@ struct fuse_file_lock {
 #define FUSE_OVER_IO_URING	(1ULL << 41)
 
 #define FUSE_ALIGN_PG_ORDER	(1ULL << 50)
+#define FUSE_QUOTA_ENABLED	(1ULL << 55)
+#define FUSE_QUOTA_LEASE	(1ULL << 56)
 #define FUSE_SETATTR_WRITEBACK	(1ULL << 58)
 #define FUSE_URING_REDUCED_Q	(1ULL << 59)
 #define FUSE_INVAL_INODE_ENTRY  (1ULL << 60)
@@ -712,6 +720,8 @@ enum fuse_opcode {
 
 	/* Extended lookup with additional flags and metadata */
 	FUSE_LOOKUPX		= 102,
+	/* lease reply layout: struct fuse_quota_lease in fuse_lowlevel.h */
+	FUSE_QUOTA_ADMIT	= 103,
 
 	/* CUSE specific operations */
 	CUSE_INIT		= 4096,
@@ -1317,14 +1327,22 @@ enum fuse_dlm_lock_type {
  * @offset: offset into the file
  * @size: size of the locked region
  * @type: type of lock
+ * @flags: FUSE_DLM_LOCK_* request flags
  */
 struct fuse_dlm_lock_in {
 	uint64_t    fh;
 	uint64_t    start;
 	uint64_t    end;
 	uint32_t    type;
-	uint32_t    reserved;
+	uint32_t    flags;
 };
+
+/*
+ * A write lock request that admits no write (grant-ahead, a load fault in a
+ * shared-writable mapping): on a FUSE_QUOTA_LEASE connection the server
+ * looks up no owner and fetches no voucher, and answers an empty lease part.
+ */
+#define FUSE_DLM_LOCK_NO_ADMIT	(1 << 0)
 
 
 /**
@@ -1338,6 +1356,25 @@ struct fuse_dlm_lock_out {
 	uint64_t end;
 	uint64_t reserved;
 };
+
+/**
+ * struct fuse_quota_admit_in - FUSE_QUOTA_ADMIT request
+ * @flags:	FUSE_QADMIT_RENEW: renewal of an expired lease or a background
+ *		renewal, sent after starting writeback of the lease's linked
+ *		inodes; without it, a first admission of an inode whose write
+ *		grant is cached
+ * @reserved:	0
+ */
+struct fuse_quota_admit_in {
+	uint32_t	flags;
+	uint32_t	reserved;
+};
+
+/**
+ * Quota admit flags
+ * FUSE_QADMIT_RENEW: the admit renews a lease; refresh the voucher always
+ */
+#define FUSE_QADMIT_RENEW	(1 << 0)
 
 /*
  * Compound request header
