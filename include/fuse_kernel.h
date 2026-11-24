@@ -456,6 +456,9 @@ struct fuse_file_lock {
  * FUSE_QUOTA_ENABLED: offered with FUSE_QUOTA_LEASE; set in the reply, only
  *		       together with FUSE_QUOTA_LEASE, when quota is enabled
  *		       for the mount; the session's quota state is fixed at INIT
+ * FUSE_DATASET_DEV: report a separate st_dev per dataset slot. The slot is
+ *		     carried in bits 16..31 of fuse_attr.flags, and in
+ *		     fuse_statx.dev_minor with dev_major 0.
  */
 #define FUSE_ASYNC_READ		(1 << 0)
 #define FUSE_POSIX_LOCKS	(1 << 1)
@@ -507,6 +510,7 @@ struct fuse_file_lock {
 #define FUSE_ALIGN_PG_ORDER	(1ULL << 50)
 #define FUSE_QUOTA_ENABLED	(1ULL << 55)
 #define FUSE_QUOTA_LEASE	(1ULL << 56)
+#define FUSE_DATASET_DEV	(1ULL << 57)
 #define FUSE_SETATTR_WRITEBACK	(1ULL << 58)
 #define FUSE_URING_REDUCED_Q	(1ULL << 59)
 #define FUSE_INVAL_INODE_ENTRY  (1ULL << 60)
@@ -618,6 +622,15 @@ struct fuse_file_lock {
  */
 #define FUSE_ATTR_SUBMOUNT      (1 << 0)
 #define FUSE_ATTR_DAX		(1 << 1)
+
+/*
+ * With FUSE_DATASET_DEV negotiated, bits 16..31 of fuse_attr.flags carry the
+ * dataset slot of the inode, and a statx reply carries it in dev_minor with
+ * dev_major 0. Slot 0 is the dataset the file system was mounted from and
+ * keeps the superblock's device.
+ */
+#define FUSE_ATTR_DEV_SLOT_SHIFT	16
+#define FUSE_ATTR_DEV_SLOT_MASK		(0xffffU << FUSE_ATTR_DEV_SLOT_SHIFT)
 
 /**
  * Open flags

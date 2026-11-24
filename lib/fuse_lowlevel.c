@@ -148,7 +148,8 @@ static void trace_request_reply(uint64_t unique, unsigned int len,
 }
 #endif
 
-static void convert_stat(const struct stat *stbuf, struct fuse_attr *attr)
+static void convert_stat(const struct stat *stbuf, struct fuse_attr *attr,
+			 bool dataset_dev)
 {
 	attr->ino	= stbuf->st_ino;
 	attr->mode	= stbuf->st_mode;
@@ -165,6 +166,17 @@ static void convert_stat(const struct stat *stbuf, struct fuse_attr *attr)
 	attr->atimensec = ST_ATIM_NSEC(stbuf);
 	attr->mtimensec = ST_MTIM_NSEC(stbuf);
 	attr->ctimensec = ST_CTIM_NSEC(stbuf);
+
+	/*
+	 * With FUSE_CAP_DATASET_DEV enabled, the filesystem returns the
+	 * dataset slot of the inode in st_dev instead of a real device
+	 * number; carry it in attr->flags for the kernel to decode.
+	 */
+	if (dataset_dev) {
+		uint32_t dev_slot = (uint32_t)stbuf->st_dev;
+		attr->flags |= (dev_slot << FUSE_ATTR_DEV_SLOT_SHIFT) &
+			       FUSE_ATTR_DEV_SLOT_MASK;
+	}
 }
 
 static void convert_attr(const struct fuse_setattr_in *attr, struct stat *stbuf)
@@ -773,7 +785,7 @@ static unsigned int calc_timeout_nsec(double t)
 		return (unsigned int) (f * 1.0e9);
 }
 
-static void fill_entry(struct fuse_entry_out *arg,
+static void fill_entry(fuse_req_t req, struct fuse_entry_out *arg,
 		       const struct fuse_entry_param *e)
 {
 	arg->nodeid = e->ino;
@@ -782,7 +794,8 @@ static void fill_entry(struct fuse_entry_out *arg,
 	arg->entry_valid_nsec = calc_timeout_nsec(e->entry_timeout);
 	arg->attr_valid = calc_timeout_sec(e->attr_timeout);
 	arg->attr_valid_nsec = calc_timeout_nsec(e->attr_timeout);
-	convert_stat(&e->attr, &arg->attr);
+	convert_stat(&e->attr, &arg->attr,
+		    req->se->conn.want_ext & FUSE_CAP_DATASET_DEV);
 }
 
 /* `buf` is allowed to be empty so that the proper size may be
@@ -791,7 +804,6 @@ size_t fuse_add_direntry_plus(fuse_req_t req, char *buf, size_t bufsize,
 			      const char *name,
 			      const struct fuse_entry_param *e, off_t off)
 {
-	(void)req;
 	size_t namelen;
 	size_t entlen;
 	size_t entlen_padded;
@@ -804,7 +816,7 @@ size_t fuse_add_direntry_plus(fuse_req_t req, char *buf, size_t bufsize,
 
 	struct fuse_direntplus *dp = (struct fuse_direntplus *) buf;
 	memset(&dp->entry_out, 0, sizeof(dp->entry_out));
-	fill_entry(&dp->entry_out, e);
+	fill_entry(req, &dp->entry_out, e);
 
 	struct fuse_dirent *dirent = &dp->dirent;
 	dirent->ino = e->attr.st_ino;
@@ -851,7 +863,7 @@ int fuse_reply_entry(fuse_req_t req, const struct fuse_entry_param *e)
 		return fuse_reply_err(req, ENOENT);
 
 	memset(&arg, 0, sizeof(arg));
-	fill_entry(&arg, e);
+	fill_entry(req, &arg, e);
 	return send_reply_ok(req, &arg, size);
 }
 
@@ -865,7 +877,7 @@ int fuse_reply_create(fuse_req_t req, const struct fuse_entry_param *e,
 	struct fuse_open_out *oarg = (struct fuse_open_out *) (buf + entrysize);
 
 	memset(buf, 0, sizeof(buf));
-	fill_entry(earg, e);
+	fill_entry(req, earg, e);
 	fill_open(oarg, f);
 	return send_reply_ok(req, buf,
 			     entrysize + sizeof(struct fuse_open_out));
@@ -877,7 +889,7 @@ int fuse_reply_lookupx(fuse_req_t req, const struct fuse_entry_param *e,
 	struct fuse_lookupx_out arg;
 
 	memset(&arg, 0, sizeof(arg));
-	fill_entry(&arg.entry, e);
+	fill_entry(req, &arg.entry, e);
 	arg.mask = mask;
 	return send_reply_ok(req, &arg, sizeof(arg));
 }
@@ -941,7 +953,8 @@ int fuse_reply_attr(fuse_req_t req, const struct stat *attr,
 	memset(&arg, 0, sizeof(arg));
 	arg.attr_valid = calc_timeout_sec(attr_timeout);
 	arg.attr_valid_nsec = calc_timeout_nsec(attr_timeout);
-	convert_stat(attr, &arg.attr);
+	convert_stat(attr, &arg.attr,
+		    req->se->conn.want_ext & FUSE_CAP_DATASET_DEV);
 
 	return send_reply_ok(req, &arg, size);
 }
@@ -3394,6 +3407,8 @@ _do_init(fuse_req_t req, const fuse_ino_t nodeid, const void *op_in,
 			se->conn.capable_ext |= FUSE_CAP_QUOTA_LEASE;
 		if (inargflags & FUSE_QUOTA_ENABLED)
 			se->conn.capable_ext |= FUSE_CAP_QUOTA_ENABLED;
+		if (inargflags & FUSE_DATASET_DEV)
+			se->conn.capable_ext |= FUSE_CAP_DATASET_DEV;
 	} else {
 		se->conn.max_readahead = 0;
 	}
@@ -3576,6 +3591,8 @@ _do_init(fuse_req_t req, const fuse_ino_t nodeid, const void *op_in,
 		outargflags |= FUSE_QUOTA_LEASE;
 	if (se->conn.want_ext & FUSE_CAP_QUOTA_ENABLED)
 		outargflags |= FUSE_QUOTA_ENABLED;
+	if (se->conn.want_ext & FUSE_CAP_DATASET_DEV)
+		outargflags |= FUSE_DATASET_DEV;
 
 	if (se->conn.align_page_order) {
 		outargflags |= FUSE_ALIGN_PG_ORDER;

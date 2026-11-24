@@ -550,6 +550,15 @@ struct fuse_loop_config_v1 {
 #define FUSE_CAP_QUOTA_ENABLED (1ULL << 55)
 
 /**
+ * Indicates that the kernel supports reporting a separate anonymous st_dev
+ * per dataset slot (FUSE_DATASET_DEV). Disabled by default; enable with
+ * fuse_set_feature_flag() when the filesystem sets struct stat::st_dev (or
+ * struct statx::stx_dev_minor, with stx_dev_major 0) of a reply to the
+ * dataset slot of the inode. Slot 0 keeps the superblock's device.
+ */
+#define FUSE_CAP_DATASET_DEV (1ULL << 57)
+
+/**
  * Indicates that the kernel marks SETATTR requests that originate from
  * writeback of locally owned attributes (->write_inode()) with
  * FATTR_WRITEBACK, surfaced to the filesystem as FUSE_SET_ATTR_WRITEBACK.
